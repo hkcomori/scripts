@@ -1,0 +1,285 @@
+#!/usr/bin/env python
+# -*- mode: python; coding: utf-8 -*-
+###############################################################
+# title:	efrename
+# version:	0.01
+# auther:	thyobu
+# description:
+#  ファイル一覧をテキストファイルに書き出し，
+#  それをエディタで編集，上書き保存．
+#  エディタを閉じると，そのテキストの通りにリネームを行う．
+###############################################################
+
+# コマンドラインオプション解析のため
+from optparse import OptionParser, OptionValueError
+import shlex
+# ファイルリストの取得やリネームのため
+import os, sys, shutil, string
+# 一時ファイルを使うため
+import tempfile
+# 外部コマンド実行のため
+from subprocess import check_call
+
+###############################################################
+# 関数
+###############################################################
+# 入力待ちプロンプト
+def prompt_for_input(prompt = "", val = None):
+	if val is not None:
+		return val
+	print prompt + " ",
+	return sys.stdin.readline().strip()
+
+# 確認応答解析
+def yes_or_no(s):
+	s = s.lower()
+	if s in ("y", "yes", "1", "true", "t"):
+		return True
+	elif s in ("n", "no", "0", "false", "f"):
+		return False
+	raise ValueError, "A yes or no response is required"
+
+###############################################################
+# コマンドラインオプション
+###############################################################
+# スクリプトの使用方法を表す文字列
+# デフォルト値は"Usage: %prog [options]"
+# "usage: "で始まらないと自動的に"usage :"が追加される
+# %progはスクリプト名で置換
+usage = "Usage: %prog [options] [path]"
+
+# OptionPraserのインスタンスを生成
+parser = OptionParser(version=u'%prog 0.1')
+
+# オプションの追加
+# action オプションが見つかった場合に行う処理
+# type   オプションの型
+# dest   引数の保存先
+#        省略時は長いオプション名を使用
+#        それも省略なら短いオプション名
+# default オプションのデフォルト値
+#         省略した場合のデフォルト値はNone
+# metavar ヘルプ表示で使われる仮引数
+#         省略時は保存先の名前を大文字にして使用
+parser.add_option(	# ディレクトリのみを対象にする
+	"-a", "--all",
+	action="store_true",
+	dest="all",
+	default=False,
+	help="list dot file"
+)
+parser.add_option(	# 指定したディレクトリのファイルをすべてリストアップ
+	"-d", "--directory",
+	action="store",
+	type="string",
+	dest="directory",
+	default=os.getcwd(),
+	help="list files in DIRECTORY"
+)
+parser.add_option(	# ファイルリストの編集に使うエディタ
+	"-e", "--editor",
+	action="store",
+	type="string",
+	dest="editor",
+	default="/usr/bin/emacsclient -nw",
+	help="use EDITOR to edit filename list"
+)
+parser.add_option(	# 子ディレクトリも再帰的にファイルリスト化
+	"-f", "--full",
+	action="store_true",
+	dest="full",
+	default=False,
+	help="create filename list by full path"
+)
+parser.add_option(	# 子ディレクトリも再帰的にファイルリスト化
+	"-l", "--link",
+	action="store_true",
+	dest="link",
+	default=False,
+	help="create hardlink"
+)
+parser.add_option(	# 子ディレクトリも再帰的にファイルリスト化
+	"-r", "--recursive",
+	action="store_true",
+	dest="recursive",
+	default=False,
+	help="create filename recursive"
+)
+parser.add_option(	# 子ディレクトリも再帰的にファイルリスト化
+	"-s", "--symlink",
+	action="store_true",
+	dest="symlink",
+	default=False,
+	help="create symbolic link"
+)
+parser.add_option(	# 冗長なモードにする
+	"-v", "--verbose",
+	action="store_true",
+	dest="verbose",
+	default=False,
+	help="explain what is being done"
+)
+
+# コマンドラインの解析
+# options 全てのオプションの値が入ったオブジェクト
+# args    コマンドライン解析後に残った引数
+(options, args) = parser.parse_args()
+
+# 指定されたエディタが存在するか確認
+cmd_name = shlex.split(options.editor)
+path_list = [ path for path in os.environ["PATH"].split(":") ]
+for path in path_list:
+	full_path = os.path.join(path, cmd_name[0])
+	if os.access(full_path, os.X_OK):
+		break
+else:
+	print cmd_name[0],": command not found"
+	exit(1)
+
+target_dirs = shlex.split(options.directory)
+
+###############################################################
+# 処理の開始
+###############################################################
+srcfiles = []
+
+# get source filename list
+if len(args) > 0:
+	for file in args:
+		srcfiles.append(file)
+elif options.directory==os.getcwd():
+	target_dir = options.directory
+	for root, dirs, files in os.walk(os.path.realpath(target_dir)):
+		# directory sort
+		temp = dirs
+		offsets = []
+		for i in range(len(dirs)):
+			offsets.append((string.lower(dirs[i]), i))
+		offsets.sort()
+		dirs = []
+		for dontcare, i in offsets:
+			dirs.append(temp[i])
+		# file sort
+		temp = files
+		offsets = []
+		for i in range(len(files)):
+			offsets.append((string.lower(files[i]), i))
+		offsets.sort()
+		files = []
+		for dontcare, i in offsets:
+			files.append(temp[i])
+		# create filename list
+		if options.full or options.recursive:
+			for d in dirs:
+				if d.startswith(".")==False or options.all:
+					srcfiles.append(root+"/"+d+"/")
+			for f in files:
+				if f.startswith(".")==False or options.all:
+					srcfiles.append(root+"/"+f)
+			if options.recursive==False:
+				break
+		else:
+			for d in dirs:
+				if d.startswith(".")==False or options.all:
+					srcfiles.append(d+"/")
+			for f in files:
+				if f.startswith(".")==False or options.all:
+					srcfiles.append(f)
+			break
+else:
+	for target_dir in target_dirs:
+		print target_dir
+		for root, dirs, files in os.walk(os.path.realpath(target_dir)):
+			# directory sort
+			temp = dirs
+			offsets = []
+			for i in range(len(dirs)):
+				offsets.append((string.lower(dirs[i]), i))
+			offsets.sort()
+			dirs = []
+			for dontcare, i in offsets:
+				dirs.append(temp[i])
+			# file sort
+			temp = files
+			offsets = []
+			for i in range(len(files)):
+				offsets.append((string.lower(files[i]), i))
+			offsets.sort()
+			files = []
+			for dontcare, i in offsets:
+				files.append(temp[i])
+			# create filename list
+			if options.full or options.recursive:
+				for d in dirs:
+					if d.startswith(".")==False or options.all:
+						srcfiles.append(root+"/"+d+"/")
+				for f in files:
+					if f.startswith(".")==False or options.all:
+						srcfiles.append(root+"/"+f)
+				if options.recursive==False:
+					break
+			else:
+				for d in dirs:
+					if d.startswith(".")==False or options.all:
+						srcfiles.append(target_dir.rstrip("/")+"/"+d+"/")
+				for f in files:
+					if f.startswith(".")==False or options.all:
+						srcfiles.append(target_dir.rstrip("/")+"/"+f)
+				break
+
+# open destination filename list
+with tempfile.NamedTemporaryFile() as f:
+	# output source filename list
+	#f.write("-*- coding: utf-8 -*-\n")
+	for srcfile in srcfiles:
+		f.write(str(srcfile)+"\n")
+
+	# edit destination filename list
+	f.seek(0)
+	cmd_name.append(f.name)
+	check_call(cmd_name)
+
+	# srcfile: source filename
+	# dstfile: destination filename
+	f.seek(0)
+	#if f.readline()!="-*- coding: utf-8 -*-\n":
+	#	f.seek(0)
+	for srcfile, dstfile in zip(srcfiles,f):
+		# remove LF from end of string
+		srcfile = srcfile.rstrip()
+		dstfile = dstfile.rstrip()
+		# check source file to exist
+		if os.access(srcfile, os.W_OK)==False:
+			print '"',srcfile,'" access denied'
+			continue
+		# 空行ならファイルを削除
+		elif dstfile=='':
+			if options.verbose:
+				res = prompt_for_input('delete "',srcfile,'"? (y/n): ')
+				if yes_or_no(res):
+					if srcfile.endswith("/"):
+						shutil.rmtree(srcfile)
+					else:
+						os.remove(srcfile)
+				else:
+					continue
+			else:
+				if srcfile.endswith("/"):
+					shutil.rmtree(srcfile)
+				else:
+					os.remove(srcfile)
+				continue
+		# ファイル名が変更されていたらリネーム
+		elif srcfile != dstfile:
+			if options.link:
+				if options.verbose:
+					print "link: ",srcfile," => ",dstfile
+				os.link(srcfile,dstfile)
+			elif options.symlink:
+				if options.verbose:
+					print "symlink: ",srcfile," => ",dstfile
+				os.symlink(srcfile,dstfile)
+			else:
+				if options.verbose:
+					print "rename: ",srcfile," => ",dstfile
+				os.renames(srcfile,dstfile)
